@@ -52,7 +52,7 @@ export default function StartScreen({ onStart, loading, error }) {
             data-testid="username-input"
             type="text"
             autoFocus
-            placeholder="Your player name"
+            placeholder="Enter your name"
             value={name}
             onChange={(e) => setName(e.target.value)}
             className="w-full h-14 px-6 rounded-full text-center text-2xl font-bold font-body border-4 border-slate-200 focus:border-green-400 focus:outline-none bg-white"
