@@ -1,8 +1,10 @@
-// Lambcraft 3D voxel game engine (Three.js)
-// Single-class engine that owns the scene, world, sheep, robber, and player.
+// Lambcraft 3D voxel game engine (Three.js) — PERFORMANCE OPTIMIZED
+// Full Minecraft-like: day/night, biomes, block drops, mobs, villagers, weapons, sheep attacks
 import * as THREE from "three";
-import { BLOCK_TYPES, HOTBAR_DEFAULT } from "../data/blocks";
+import { BLOCK_TYPES, getBlockDrop } from "../data/blocks";
 import { SHEEP_TYPES, SHEEP_BY_ID, pickRandomSheepType } from "../data/sheep";
+import { MOB_TYPES, pickRandomMobType } from "../data/mobs";
+import { VILLAGER_TYPES, pickRandomVillagerType } from "../data/villagers";
 
 const GRAVITY = -28;
 const JUMP_VELOCITY = 9.5;
@@ -11,58 +13,161 @@ const PLAYER_HEIGHT = 1.7;
 const PLAYER_RADIUS = 0.3;
 const REACH = 5.5;
 
+// Day/night cycle: 5 min day, 5 min night
+const DAY_DURATION = 5 * 60;
+const NIGHT_DURATION = 5 * 60;
+const CYCLE_DURATION = DAY_DURATION + NIGHT_DURATION;
+
 const key = (x, y, z) => `${x},${y},${z}`;
+
+// --- Biome system ---
+const BIOME_SIZE = 64;
+
+function getBiomeAt(x, z) {
+  const bx = Math.floor((x + 500) / BIOME_SIZE);
+  const bz = Math.floor((z + 500) / BIOME_SIZE);
+  const h = ((bx * 374761393 + bz * 668265263) & 0x7FFFFFFF) % 5;
+  const biomes = ["plains", "forest", "desert", "volcano", "fantasy"];
+  return biomes[h];
+}
+
+function biomeTerrainHeight(biome, x, z) {
+  const base = 3;
+  const n1 = Math.sin(x * 0.12) * 1.5 + Math.cos(z * 0.11) * 1.5;
+  const n2 = Math.sin(x * 0.3 + 1.5) * 0.6 + Math.cos(z * 0.25 + 2.3) * 0.6;
+  switch (biome) {
+    case "plains":   return Math.max(1, Math.floor(base + n1 * 0.4 + n2 * 0.2));
+    case "forest":   return Math.max(1, Math.floor(base + n1 * 0.8 + n2 * 0.3));
+    case "desert":   return Math.max(1, Math.floor(base + n1 * 0.3 + n2 * 0.1));
+    case "volcano":  return Math.max(1, Math.floor(base + Math.abs(n1) * 1.5 + n2 * 0.5));
+    case "fantasy":  return Math.max(1, Math.floor(base + n1 * 0.6 + n2 * 0.4));
+    default:         return Math.max(1, Math.floor(base + n1 * 0.5));
+  }
+}
+
+function biomeTopBlock(biome) {
+  switch (biome) {
+    case "plains":   return "grass";
+    case "forest":   return "grass";
+    case "desert":   return "sand";
+    case "volcano":  return "lava_stone";
+    case "fantasy":  return "fantasy_glow";
+    default:         return "grass";
+  }
+}
+
+function biomeSubBlock(biome) {
+  switch (biome) {
+    case "plains":   return "dirt";
+    case "forest":   return "dirt";
+    case "desert":   return "sand";
+    case "volcano":  return "obsidian";
+    case "fantasy":  return "crystal";
+    default:         return "dirt";
+  }
+}
+
+function biomeTreeChance(biome) {
+  switch (biome) {
+    case "plains":   return 0.002;
+    case "forest":   return 0.01;
+    case "desert":   return 0.001;
+    case "volcano":  return 0.0005;
+    case "fantasy":  return 0.004;
+    default:         return 0.005;
+  }
+}
+
+function biomeFlowerChance(biome) {
+  switch (biome) {
+    case "plains":   return 0.008;
+    case "forest":   return 0.005;
+    case "desert":   return 0.002;
+    case "volcano":  return 0.0;
+    case "fantasy":  return 0.01;
+    default:         return 0.003;
+  }
+}
 
 export class LambcraftGame {
   constructor(container, callbacks = {}) {
     this.container = container;
-    this.cb = callbacks; // onState, onCatch, onRobber, onSelectChange, onSave
+    this.cb = callbacks;
     this.disposed = false;
 
     // --- Scene ---
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0xbae6fd); // sky blue
-    this.scene.fog = new THREE.Fog(0xbae6fd, 30, 80);
+    this.scene.background = new THREE.Color(0xbae6fd);
+    this.scene.fog = new THREE.Fog(0xbae6fd, 15, 45); // closer fog = more culling
 
     // --- Camera ---
-    this.camera = new THREE.PerspectiveCamera(72, 1, 0.1, 200);
+    this.camera = new THREE.PerspectiveCamera(72, 1, 0.1, 50); // reduced far plane
     this.camera.position.set(0, 6, 0);
     this.yaw = 0;
     this.pitch = 0;
 
-    // --- Renderer ---
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // --- Renderer (PERFORMANCE: no AA, pixel ratio capped at 1) ---
+    this.renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+    this.renderer.setPixelRatio(1); // hard cap at 1 — no Retina rendering
     container.appendChild(this.renderer.domElement);
     this.renderer.domElement.style.cursor = "crosshair";
     this.renderer.domElement.setAttribute("data-testid", "game-canvas");
 
     // --- Lights ---
-    const ambient = new THREE.AmbientLight(0xffffff, 0.85);
-    const sun = new THREE.DirectionalLight(0xffffff, 0.7);
-    sun.position.set(20, 30, 10);
-    this.scene.add(ambient, sun);
+    this.ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
+    this.sunLight = new THREE.DirectionalLight(0xffffff, 0.9);
+    this.sunLight.position.set(20, 30, 10);
+    this.scene.add(this.ambientLight, this.sunLight);
 
-    // --- World ---
-    this.world = new Map(); // "x,y,z" -> blockId
-    this.blockMeshes = new Map();
-    this.sheepEntities = []; // { group, type, vel, target, alive }
-    this.maxSheep = 12;
+    // --- Stars ---
+    this._buildStars();
+
+    // --- World (using instanced meshes per block type) ---
+    this.world = new Map();
+    this.blockMeshes = new Map(); // key -> { meshType, index } for instanced lookup
+    this.sheepEntities = [];
+    this.maxSheep = 4;
     this.blocksPlaced = 0;
     this.blocksBroken = 0;
+
+    // --- Mobs ---
+    this.mobEntities = [];
+    this.maxMobs = 2;
+
+    // --- Villagers ---
+    this.villagerEntities = [];
 
     // --- Player ---
     this.player = {
       pos: new THREE.Vector3(0, 0, 0),
       vel: new THREE.Vector3(),
       onGround: false,
+      health: 20,
+      maxHealth: 20,
     };
     this.keys = new Set();
     this.pointerLocked = false;
 
     // --- Hotbar ---
-    this.hotbar = HOTBAR_DEFAULT;
+    this.hotbar = [
+      { type: "tool",  id: "catcher",  name: "Sheep Catcher" },
+      { type: "tool",  id: "sword",    name: "Sword" },
+      { type: "tool",  id: "pickaxe",  name: "Pickaxe" },
+      { type: "block", id: "grass" },
+      { type: "block", id: "dirt" },
+      { type: "block", id: "stone" },
+      { type: "block", id: "wood" },
+      { type: "block", id: "planks" },
+      { type: "block", id: "brick" },
+      { type: "block", id: "fence" },
+    ];
     this.selected = 0;
+
+    // --- Inventory ---
+    this.inventory = {
+      grass: 64, dirt: 64, stone: 32, wood: 32, planks: 32,
+      brick: 16, fence: 16, sand: 16, cobble: 16, glass: 8,
+    };
 
     // --- Highlight box ---
     this.highlight = new THREE.LineSegments(
@@ -76,8 +181,24 @@ export class LambcraftGame {
     this.raycaster = new THREE.Raycaster();
     this.raycaster.far = REACH;
 
+    // --- Day/night ---
+    this._daySky = new THREE.Color(0xbae6fd);
+    this._nightSky = new THREE.Color(0x0a0a2e);
+    this._dayFog = new THREE.Color(0xbae6fd);
+    this._nightFog = new THREE.Color(0x0a0a2e);
+    this.timeOfDay = 0;
+
+    // --- Sheep attack cooldowns ---
+    this.sheepAttackCooldowns = new Map();
+
+    // --- Instanced mesh tracking ---
+    this._instancedGroups = new Map(); // blockId -> { mesh, instances: [] }
+
+    // --- Build ---
     this._buildWorld();
     this._initSheep();
+    this._initMobs();
+    this._spawnVillages();
     this._spawnRobber();
     this._spawnPlayerSafe();
     this._bindEvents();
@@ -85,107 +206,277 @@ export class LambcraftGame {
     this._last = performance.now();
     this._loop = this._loop.bind(this);
     this._raf = requestAnimationFrame(this._loop);
-    this._lastSave = 0;
+    this._frameCount = 0;
   }
 
-  // ---------- World building ----------
+  // ---------- Stars ----------
+  _buildStars() {
+    const starGeo = new THREE.BufferGeometry();
+    const starPositions = [];
+    for (let i = 0; i < 100; i++) { // reduced from 200
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.random() * Math.PI;
+      const r = 200;
+      starPositions.push(
+        r * Math.sin(phi) * Math.cos(theta),
+        r * Math.cos(phi) + 20,
+        r * Math.sin(phi) * Math.sin(theta)
+      );
+    }
+    starGeo.setAttribute("position", new THREE.Float32BufferAttribute(starPositions, 3));
+    this.stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.8 }));
+    this.stars.visible = false;
+    this.scene.add(this.stars);
+  }
+
+  // ---------- Day/Night ----------
+  get isNight() {
+    const t = this.timeOfDay % CYCLE_DURATION;
+    return t >= DAY_DURATION;
+  }
+
+  get dayNightFactor() {
+    const t = this.timeOfDay % CYCLE_DURATION;
+    if (t < DAY_DURATION) {
+      return Math.max(0, (t / DAY_DURATION) - 0.7) * 3.33;
+    } else {
+      const nightT = (t - DAY_DURATION) / NIGHT_DURATION;
+      return Math.min(1, nightT * 3.33);
+    }
+  }
+
+  _updateDayNight(dt) {
+    this.timeOfDay = (this.timeOfDay + dt) % CYCLE_DURATION;
+    const f = this.dayNightFactor;
+    this.scene.background.lerpColors(this._daySky, this._nightSky, f);
+    this.scene.fog.color.lerpColors(this._dayFog, this._nightFog, f);
+    this.ambientLight.intensity = THREE.MathUtils.lerp(0.85, 0.15, f);
+    this.sunLight.intensity = THREE.MathUtils.lerp(0.9, 0.05, f);
+    this.stars.visible = f > 0.3;
+    if (this.stars.visible) {
+      this.stars.material.opacity = Math.min(1, (f - 0.3) * 3);
+    }
+    const t = this.timeOfDay % CYCLE_DURATION;
+    const angle = (t / CYCLE_DURATION) * Math.PI * 2;
+    this.sunLight.position.set(
+      Math.cos(angle) * 30,
+      Math.sin(angle) * 30 + 10,
+      10
+    );
+    if (this.cb.onDayNightChange) {
+      this.cb.onDayNightChange({ isNight: this.isNight, factor: f });
+    }
+  }
+
+  // ---------- World building (INSTANCED MESHES) ----------
   _buildWorld() {
-    const SIZE = 16;
+    const SIZE = 20; // reduced from 40 for performance
+    this._heightCache = new Map();
+
+    // First pass: determine which blocks go where
+    const blockPositions = new Map(); // blockId -> [{x,y,z}]
+
     for (let x = -SIZE; x <= SIZE; x++) {
       for (let z = -SIZE; z <= SIZE; z++) {
-        const h = Math.max(
-          1,
-          Math.floor(3 + Math.sin(x * 0.45) * 1.4 + Math.cos(z * 0.42) * 1.4)
-        );
+        const biome = getBiomeAt(x, z);
+        const h = biomeTerrainHeight(biome, x, z);
+        const topBlock = biomeTopBlock(biome);
+        const subBlock = biomeSubBlock(biome);
+
         for (let y = 0; y < h; y++) {
-          let b = "dirt";
-          if (y === h - 1) b = "grass";
+          let b = subBlock;
+          if (y === h - 1) b = topBlock;
           else if (y < 1) b = "stone";
-          this._setBlock(x, y, z, b, false);
+          if (!blockPositions.has(b)) blockPositions.set(b, []);
+          blockPositions.get(b).push({ x, y, z });
+          this.world.set(key(x, y, z), b);
         }
+
+        // Ore generation
+        if (h > 2 && Math.random() < 0.005) {
+          const oreKey = key(x, h - 1, z);
+          if (!blockPositions.has("coal_ore")) blockPositions.set("coal_ore", []);
+          blockPositions.get("coal_ore").push({ x, y: h - 1, z });
+          this.world.set(oreKey, "coal_ore");
+        }
+
         const r = Math.random();
-        const nearSpawn = Math.abs(x) <= 2 && Math.abs(z) <= 2;
+        const nearSpawn = Math.abs(x) <= 3 && Math.abs(z) <= 3;
         if (!nearSpawn) {
-          if (r < 0.025) this._placeTree(x, h, z);
-          else if (r < 0.05) this._setBlock(x, h, z, "flower", false);
+          if (r < biomeTreeChance(biome)) {
+            this._collectTreeBlocks(x, h, z, biome, blockPositions);
+          } else if (r < biomeTreeChance(biome) + biomeFlowerChance(biome)) {
+            // Decorations are handled as individual meshes (too few to instance)
+          }
+        }
+
+        this._heightCache.set(x + "," + z, h);
+
+        // Lakes/ponds
+        if ((biome === "plains" || biome === "forest") && !nearSpawn) {
+          const lakeNoise = Math.sin(x * 0.05 + 3.7) * Math.cos(z * 0.05 + 1.2);
+          if (lakeNoise > 0.85) {
+            const k1 = key(x, h - 1, z);
+            const k2 = key(x, h - 2, z);
+            this.world.set(k1, "water");
+            this.world.set(k2, "clay");
+            if (!blockPositions.has("water")) blockPositions.set("water", []);
+            if (!blockPositions.has("clay")) blockPositions.set("clay", []);
+            blockPositions.get("water").push({ x, y: h - 1, z });
+            blockPositions.get("clay").push({ x, y: h - 2, z });
+          }
         }
       }
     }
-    // Sand patches
-    for (let i = 0; i < 12; i++) {
-      const cx = Math.floor(Math.random() * (SIZE * 2)) - SIZE;
-      const cz = Math.floor(Math.random() * (SIZE * 2)) - SIZE;
-      for (let dx = -1; dx <= 1; dx++) {
-        for (let dz = -1; dz <= 1; dz++) {
-          const x = cx + dx, z = cz + dz;
-          const top = this._topY(x, z);
-          if (top >= 0) this._setBlock(x, top, z, "sand", false);
+
+    // Create instanced meshes for each block type
+    const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+    for (const [blockId, positions] of blockPositions) {
+      if (positions.length === 0) continue;
+      const block = BLOCK_TYPES[blockId];
+      if (!block) continue;
+
+      const mat = new THREE.MeshLambertMaterial({
+        color: new THREE.Color(block.sideColor || block.color || "#888"),
+        transparent: !!block.transparent,
+        opacity: block.transparent ? 0.6 : 1.0,
+      });
+
+      const instancedMesh = new THREE.InstancedMesh(boxGeo, mat, positions.length);
+      instancedMesh.userData = { kind: "block-instanced", blockId };
+
+      const dummy = new THREE.Object3D();
+      for (let i = 0; i < positions.length; i++) {
+        const p = positions[i];
+        dummy.position.set(p.x + 0.5, p.y + (block.liquid ? 0 : 0.5), p.z + 0.5);
+        dummy.updateMatrix();
+        instancedMesh.setMatrixAt(i, dummy.matrix);
+      }
+      instancedMesh.instanceMatrix.needsUpdate = true;
+      this.scene.add(instancedMesh);
+    }
+
+    // Generate decorations as instanced meshes (PERFORMANCE: no individual meshes)
+    const decoPositions = new Map(); // blockId -> [{x,y,z}]
+    for (let x = -SIZE; x <= SIZE; x++) {
+      for (let z = -SIZE; z <= SIZE; z++) {
+        const biome = getBiomeAt(x, z);
+        const h = this._heightCache.get(x + "," + z);
+        if (!h) continue;
+        if (Math.abs(x) <= 3 && Math.abs(z) <= 3) continue;
+        const r = Math.random();
+        if (r < biomeFlowerChance(biome) * 0.15) { // drastically reduced
+          let decoId;
+          if (biome === "fantasy") decoId = ["fantasy_flower","mushroom_r","mushroom_b"][Math.floor(Math.random()*3)];
+          else if (biome === "desert") decoId = "cactus";
+          else decoId = ["flower","tulip","daisy"][Math.floor(Math.random()*3)];
+          if (!decoPositions.has(decoId)) decoPositions.set(decoId, []);
+          decoPositions.get(decoId).push({ x, y: h, z });
+          this.world.set(key(x, h, z), decoId);
         }
       }
+    }
+    // Create instanced meshes for decorations
+    const decoGeo = new THREE.BoxGeometry(0.4, 0.6, 0.4);
+    for (const [blockId, positions] of decoPositions) {
+      if (positions.length === 0) continue;
+      const block = BLOCK_TYPES[blockId];
+      if (!block) continue;
+      const mat = new THREE.MeshLambertMaterial({
+        color: new THREE.Color(block.topColor || block.color || "#888"),
+        transparent: true, opacity: 0.9,
+      });
+      const instMesh = new THREE.InstancedMesh(decoGeo, mat, positions.length);
+      const dummy = new THREE.Object3D();
+      for (let i = 0; i < positions.length; i++) {
+        const p = positions[i];
+        dummy.position.set(p.x + 0.5, p.y + 0.3, p.z + 0.5);
+        dummy.updateMatrix();
+        instMesh.setMatrixAt(i, dummy.matrix);
+      }
+      instMesh.instanceMatrix.needsUpdate = true;
+      instMesh.userData = { kind: "deco-instanced", blockId };
+      this.scene.add(instMesh);
     }
   }
 
-  _placeTree(x, baseY, z) {
-    for (let i = 0; i < 3; i++) this._setBlock(x, baseY + i, z, "wood", false);
-    for (let dx = -1; dx <= 1; dx++)
-      for (let dz = -1; dz <= 1; dz++)
-        for (let dy = 2; dy <= 3; dy++) {
-          if (dx === 0 && dz === 0 && dy === 2) continue;
-          if (Math.abs(dx) + Math.abs(dz) === 2 && Math.random() < 0.4) continue;
-          this._setBlock(x + dx, baseY + dy, z + dz, "leaves", false);
+  _collectTreeBlocks(x, baseY, z, biome, blockPositions) {
+    if (biome === "desert") {
+      const h = 2 + Math.floor(Math.random() * 2);
+      for (let i = 0; i < h; i++) {
+        const k = key(x, baseY + i, z);
+        if (!blockPositions.has("cactus")) blockPositions.set("cactus", []);
+        blockPositions.get("cactus").push({ x, y: baseY + i, z });
+        this.world.set(k, "cactus");
+      }
+      return;
+    }
+    if (biome === "volcano") {
+      for (let i = 0; i < 3; i++) {
+        const k = key(x, baseY + i, z);
+        if (!blockPositions.has("obsidian")) blockPositions.set("obsidian", []);
+        blockPositions.get("obsidian").push({ x, y: baseY + i, z });
+        this.world.set(k, "obsidian");
+      }
+      return;
+    }
+    // Normal tree — add to bark/leaves instanced pools
+    const trunkH = biome === "forest" ? 4 : 3;
+    if (!blockPositions.has("wood")) blockPositions.set("wood", []);
+    if (!blockPositions.has("leaves")) blockPositions.set("leaves", []);
+    for (let i = 0; i < trunkH; i++) {
+      blockPositions.get("wood").push({ x, y: baseY + i, z });
+      this.world.set(key(x, baseY + i, z), "wood");
+    }
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dz = -2; dz <= 2; dz++) {
+        for (let dy = trunkH - 1; dy <= trunkH + 1; dy++) {
+          if (dx === 0 && dz === 0 && dy < trunkH + 1) continue;
+          if (Math.abs(dx) === 2 && Math.abs(dz) === 2 && Math.random() < 0.4) continue;
+          blockPositions.get("leaves").push({ x: x + dx, y: baseY + dy, z: z + dz });
+          this.world.set(key(x + dx, baseY + dy, z + dz), "leaves");
         }
-    this._setBlock(x, baseY + 4, z, "leaves", false);
+      }
+    }
+    blockPositions.get("leaves").push({ x, y: baseY + trunkH + 1, z });
+    this.world.set(key(x, baseY + trunkH + 1, z), "leaves");
+  }
+
+  _placeDecoration(x, baseY, z, biome) {
+    if (biome === "desert") {
+      if (Math.random() < 0.5) this._setBlock(x, baseY, z, "cactus", false);
+    } else if (biome === "fantasy") {
+      const r = Math.random();
+      if (r < 0.4) this._setBlock(x, baseY, z, "fantasy_flower", false);
+      else if (r < 0.6) this._setBlock(x, baseY, z, "mushroom_r", false);
+      else this._setBlock(x, baseY, z, "mushroom_b", false);
+    } else {
+      const r = Math.random();
+      if (r < 0.33) this._setBlock(x, baseY, z, "flower", false);
+      else if (r < 0.66) this._setBlock(x, baseY, z, "tulip", false);
+      else this._setBlock(x, baseY, z, "daisy", false);
+    }
   }
 
   _topY(x, z) {
-    for (let y = 20; y >= 0; y--) if (this.world.has(key(x, y, z))) return y + 1;
+    if (this._heightCache) {
+      const k = x + "," + z;
+      if (this._heightCache.has(k)) return this._heightCache.get(k);
+    }
+    for (let y = 30; y >= 0; y--) if (this.world.has(key(x, y, z))) return y + 1;
     return -1;
   }
 
   _setBlock(x, y, z, blockId, placedByPlayer = true) {
     const k = key(x, y, z);
-    const existing = this.blockMeshes.get(k);
-    if (existing) {
-      this.scene.remove(existing);
-      if (Array.isArray(existing.geometry)) existing.geometry.forEach(g => g.dispose());
-      else existing.geometry.dispose();
-      if (Array.isArray(existing.material)) existing.material.forEach(m => m.dispose());
-      else existing.material.dispose();
-      this.blockMeshes.delete(k);
-      this.world.delete(k);
-    }
+    // For individual blocks (decorations etc.), use simple mesh
     if (!blockId) return;
     const block = BLOCK_TYPES[blockId];
     if (!block) return;
 
-    // Fence: special mesh (post + two horizontal rails)
-    if (blockId === "fence") {
-      const group = new THREE.Group();
-      const woodMat = new THREE.MeshLambertMaterial({ color: block.color });
-      const postGeo = new THREE.BoxGeometry(0.15, 1.5, 0.15);
-      const post = new THREE.Mesh(postGeo, woodMat);
-      post.position.y = 0.75;
-      group.add(post);
-      // two rails
-      const railGeo = new THREE.BoxGeometry(0.1, 0.12, 1.0);
-      const rail1 = new THREE.Mesh(railGeo, woodMat);
-      rail1.position.set(0, 0.45, 0);
-      const rail2 = new THREE.Mesh(railGeo, woodMat);
-      rail2.position.set(0, 1.05, 0);
-      group.add(rail1, rail2);
-      group.position.set(x + 0.5, y, z + 0.5);
-      group.userData = { kind: "block", blockId, x, y, z, isFence: true };
-      this.world.set(k, blockId);
-      this.blockMeshes.set(k, group);
-      this.scene.add(group);
-      if (placedByPlayer) this.blocksPlaced++;
-      return;
-    }
-
-    const geo = new THREE.BoxGeometry(1, 1, 1);
-    const mat = new THREE.MeshLambertMaterial({ color: block.color });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(x + 0.5, y + 0.5, z + 0.5);
+    const mesh = this._makeBlockMesh(blockId);
+    if (!mesh) return;
+    mesh.position.set(x + 0.5, y + (block.liquid ? 0 : 0.5), z + 0.5);
     mesh.userData = { kind: "block", blockId, x, y, z };
     this.world.set(k, blockId);
     this.blockMeshes.set(k, mesh);
@@ -196,28 +487,168 @@ export class LambcraftGame {
   _removeBlock(x, y, z) {
     const k = key(x, y, z);
     if (!this.world.has(k)) return;
+    this.world.delete(k);
     const mesh = this.blockMeshes.get(k);
     if (mesh) {
       this.scene.remove(mesh);
-      mesh.geometry.dispose();
-      mesh.material.dispose();
+      if (mesh.geometry) mesh.geometry.dispose();
+      if (mesh.material) {
+        if (Array.isArray(mesh.material)) mesh.material.forEach(m => m.dispose());
+        else mesh.material.dispose();
+      }
+      this.blockMeshes.delete(k);
     }
-    this.blockMeshes.delete(k);
-    this.world.delete(k);
     this.blocksBroken++;
   }
 
-  hasBlock(x, y, z) {
-    return this.world.has(key(x, y, z));
+  // --- Simplified block mesh creation (single material) ---
+  _makeBlockMesh(blockId) {
+    const block = BLOCK_TYPES[blockId];
+    if (!block) return null;
+    if (blockId === "fence") return this._makeFenceMesh(block);
+    if (block.liquid) return this._makeLiquidMesh(block);
+    if (blockId === "flower" || blockId === "tulip" || blockId === "daisy" || blockId === "sapling") return this._makePlantMesh(block);
+    if (blockId === "cactus") return this._makeCactusMesh(block);
+    if (blockId === "mushroom_r" || blockId === "mushroom_b") return this._makeMushroomMesh(block);
+
+    // Standard cube — SINGLE material (not 6-face multi-material)
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    const sideC = new THREE.Color(block.sideColor || block.color || "#888");
+    const mat = new THREE.MeshLambertMaterial({ color: sideC, transparent: !!block.transparent, opacity: block.transparent ? 0.6 : 1.0 });
+    return new THREE.Mesh(geo, mat);
   }
 
-  // ---------- Sheep ----------
+  _makeFenceMesh(block) {
+    const group = new THREE.Group();
+    const woodMat = new THREE.MeshLambertMaterial({ color: block.topColor || block.color });
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1.5, 0.15), woodMat);
+    post.position.y = 0.75;
+    group.add(post);
+    const railGeo = new THREE.BoxGeometry(0.1, 0.12, 1.0);
+    const rail1 = new THREE.Mesh(railGeo, woodMat);
+    rail1.position.set(0, 0.45, 0);
+    const rail2 = new THREE.Mesh(railGeo, woodMat);
+    rail2.position.set(0, 1.05, 0);
+    group.add(rail1, rail2);
+    return group;
+  }
+
+  _makeLiquidMesh(block) {
+    const geo = new THREE.BoxGeometry(1, 0.85, 1);
+    const mat = new THREE.MeshLambertMaterial({ color: block.topColor, transparent: true, opacity: 0.5 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.y = -0.075;
+    return mesh;
+  }
+
+  _makePlantMesh(block) {
+    const group = new THREE.Group();
+    const mat = new THREE.MeshLambertMaterial({ color: block.topColor, transparent: true, opacity: 0.9 });
+    const stemMat = new THREE.MeshLambertMaterial({ color: "#228B45" });
+    const stem = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.5, 0.06), stemMat);
+    stem.position.y = 0.25;
+    group.add(stem);
+    const topGeo = new THREE.BoxGeometry(0.4, 0.15, 0.02);
+    const t1 = new THREE.Mesh(topGeo, mat);
+    t1.position.y = 0.55;
+    t1.rotation.y = Math.PI / 4;
+    const t2 = new THREE.Mesh(topGeo, mat);
+    t2.position.y = 0.55;
+    t2.rotation.y = -Math.PI / 4;
+    group.add(t1, t2);
+    return group;
+  }
+
+  _makeCactusMesh(block) {
+    const mat = new THREE.MeshLambertMaterial({ color: block.topColor });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1, 0.8), mat);
+    mesh.position.y = 0.5;
+    return mesh;
+  }
+
+  _makeMushroomMesh(block) {
+    const group = new THREE.Group();
+    const stemMat = new THREE.MeshLambertMaterial({ color: "#FFFFFF" });
+    const capMat = new THREE.MeshLambertMaterial({ color: block.topColor });
+    const stem = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.3, 0.2), stemMat);
+    stem.position.y = 0.15;
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.2, 0.5), capMat);
+    cap.position.y = 0.4;
+    group.add(stem, cap);
+    return group;
+  }
+
+  // --- Cast ray (DDA voxel traversal — O(distance) instead of O(scene objects)) ---
+  _castRay() {
+    const origin = this.camera.position.clone();
+    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    dir.normalize();
+    
+    // DDA voxel traversal
+    let x = Math.floor(origin.x);
+    let y = Math.floor(origin.y);
+    let z = Math.floor(origin.z);
+    
+    const stepX = dir.x >= 0 ? 1 : -1;
+    const stepY = dir.y >= 0 ? 1 : -1;
+    const stepZ = dir.z >= 0 ? 1 : -1;
+    
+    const tDeltaX = dir.x !== 0 ? Math.abs(1 / dir.x) : Infinity;
+    const tDeltaY = dir.y !== 0 ? Math.abs(1 / dir.y) : Infinity;
+    const tDeltaZ = dir.z !== 0 ? Math.abs(1 / dir.z) : Infinity;
+    
+    let tMaxX = dir.x !== 0 ? ((dir.x > 0 ? (x + 1 - origin.x) : (origin.x - x)) * tDeltaX) : Infinity;
+    let tMaxY = dir.y !== 0 ? ((dir.y > 0 ? (y + 1 - origin.y) : (origin.y - y)) * tDeltaY) : Infinity;
+    let tMaxZ = dir.z !== 0 ? ((dir.z > 0 ? (z + 1 - origin.z) : (origin.z - z)) * tDeltaZ) : Infinity;
+    
+    for (let i = 0; i < Math.ceil(REACH * 2); i++) {
+      const k = key(x, y, z);
+      if (this.world.has(k)) {
+        const blockId = this.world.get(k);
+        const block = BLOCK_TYPES[blockId];
+        if (block && !block.liquid) {
+          return { object: { userData: { kind: 'block', blockId, x, y, z } }, distance: i * 0.5 };
+        }
+      }
+      if (tMaxX < tMaxY) {
+        if (tMaxX < tMaxZ) { x += stepX; tMaxX += tDeltaX; }
+        else { z += stepZ; tMaxZ += tDeltaZ; }
+      } else {
+        if (tMaxY < tMaxZ) { y += stepY; tMaxY += tDeltaY; }
+        else { z += stepZ; tMaxZ += tDeltaZ; }
+      }
+    }
+    return null;
+  }
+
+  // --- Sheep AI ---
+  _initSheep() {
+    for (let i = 0; i < this.maxSheep; i++) this._spawnSheep();
+  }
+
+  _spawnSheep() {
+    const type = pickRandomSheepType();
+    const group = this._makeSheepMesh(type);
+    let tries = 0, x, z, y;
+    do {
+      x = (Math.random() - 0.5) * 40;
+      z = (Math.random() - 0.5) * 40;
+      y = this._topY(Math.floor(x), Math.floor(z));
+      tries++;
+    } while (y < 2 && tries < 20);
+    group.position.set(x, y, z);
+    this.scene.add(group);
+    this.sheepEntities.push({
+      group, type, vel: new THREE.Vector3(), wanderTimer: Math.random() * 3,
+      bounceT: Math.random() * 10, alive: true, trapped: false, hasAttack: type.specialAttack != null,
+    });
+  }
+
   _makeSheepMesh(type) {
     const group = new THREE.Group();
-    const woolMat = new THREE.MeshLambertMaterial({ color: type.wool });
-    const accentMat = new THREE.MeshLambertMaterial({ color: type.accent });
-    const black = new THREE.MeshLambertMaterial({ color: 0x1f2937 });
-
+    const woolMat = new THREE.MeshLambertMaterial({ color: type.woolColor });
+    const accentMat = new THREE.MeshLambertMaterial({ color: type.accentColor || "#333" });
+    const black = new THREE.MeshLambertMaterial({ color: "#111" });
     const body = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.6, 0.55), woolMat);
     body.position.y = 0.45;
     const head = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), accentMat);
@@ -228,525 +659,370 @@ export class LambcraftGame {
     const eyeR = new THREE.Mesh(eyeGeo, black);
     eyeR.position.set(0.75, 0.7, -0.13);
     const legGeo = new THREE.BoxGeometry(0.14, 0.3, 0.14);
-    const legMat = accentMat;
-    const positions = [
-      [0.3, 0.15, 0.18], [0.3, 0.15, -0.18], [-0.3, 0.15, 0.18], [-0.3, 0.15, -0.18],
-    ];
-    positions.forEach(([px, py, pz]) => {
-      const l = new THREE.Mesh(legGeo, legMat);
+    [[0.3, 0.15, 0.18], [0.3, 0.15, -0.18], [-0.3, 0.15, 0.18], [-0.3, 0.15, -0.18]].forEach(([px, py, pz]) => {
+      const l = new THREE.Mesh(legGeo, accentMat);
       l.position.set(px, py, pz);
       group.add(l);
     });
     group.add(body, head, eyeL, eyeR);
-    // Tiny tail puff
     const tail = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.2), woolMat);
     tail.position.set(-0.55, 0.55, 0);
     group.add(tail);
-
+    if (type.id === "unicorn") {
+      const hornMat = new THREE.MeshLambertMaterial({ color: 0xFFD700 });
+      const horn = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.3, 0.08), hornMat);
+      horn.position.set(0.75, 0.95, 0);
+      group.add(horn);
+    }
     group.userData = { kind: "sheep", typeId: type.id };
     return group;
   }
 
-  _spawnSheep() {
-    const type = pickRandomSheepType();
-    const group = this._makeSheepMesh(type);
+  _initMobs() {
+    for (let i = 0; i < this.maxMobs; i++) this._spawnMob();
+  }
+
+  _spawnMob() {
+    const mobType = pickRandomMobType();
+    const group = this._makeMobMesh(mobType);
     let tries = 0, x, z, y;
     do {
-      x = Math.floor(Math.random() * 28) - 14;
-      z = Math.floor(Math.random() * 28) - 14;
-      y = this._topY(x, z);
+      x = (Math.random() - 0.5) * 30;
+      z = (Math.random() - 0.5) * 30;
+      y = this._topY(Math.floor(x), Math.floor(z));
       tries++;
-    } while ((y < 0 || y > 8) && tries < 20);
-    if (y < 0) y = 4;
-    group.position.set(x + 0.5, y, z + 0.5);
+    } while (y < 2 && tries < 20);
+    group.position.set(x, y, z);
     this.scene.add(group);
-    const ent = {
-      group,
-      type,
-      vel: new THREE.Vector3(),
-      target: null,
-      alive: true,
-      wanderTimer: 0,
-      bounceT: Math.random() * Math.PI * 2,
-    };
-    this.sheepEntities.push(ent);
-    return ent;
+    this.mobEntities.push({
+      group, type: mobType, vel: new THREE.Vector3(), wanderTimer: Math.random() * 4,
+      bounceT: Math.random() * 10, alive: true, speed: mobType.speed,
+    });
   }
 
-  _initSheep() {
-    for (let i = 0; i < this.maxSheep; i++) this._spawnSheep();
-  }
-
-  // ---------- Robber ----------
-  _spawnRobber() {
-    const g = new THREE.Group();
-    const skin = new THREE.MeshLambertMaterial({ color: 0xD9B382 });
-    const shirt = new THREE.MeshLambertMaterial({ color: 0x6D28D9 });
-    const pants = new THREE.MeshLambertMaterial({ color: 0x1f2937 });
-    const mask = new THREE.MeshLambertMaterial({ color: 0x1f2937 });
-    const eye = new THREE.MeshLambertMaterial({ color: 0xffffff });
-
-    const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), skin);
-    head.position.y = 1.4;
-    const maskBand = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.16, 0.52), mask);
-    maskBand.position.y = 1.45;
-    const eyeL = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.05), eye);
-    eyeL.position.set(0.13, 1.45, 0.27);
-    const eyeR = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.05), eye);
-    eyeR.position.set(-0.13, 1.45, 0.27);
-    const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.7, 0.4), shirt);
-    body.position.y = 0.85;
-    const legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.6, 0.3), pants);
-    legL.position.set(0.15, 0.3, 0);
-    const legR = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.6, 0.3), pants);
-    legR.position.set(-0.15, 0.3, 0);
-    g.add(head, maskBand, eyeL, eyeR, body, legL, legR);
-    g.userData = { kind: "robber" };
-
-    let x = 10, z = 10;
-    const y = this._topY(x, z);
-    g.position.set(x + 0.5, y, z + 0.5);
-    this.scene.add(g);
-    this.robber = {
-      group: g,
-      target: null,
-      snatchTimer: 0,
-      trapped: false,
-      trapTimer: 0,
-      cageGroup: null,
-      lootDropped: false,
-    };
-  }
-
-  // Build a cage around the trapped robber
-  _buildCage(robber) {
-    const cg = new THREE.Group();
-    const barMat = new THREE.MeshLambertMaterial({ color: 0x6B7280 });
-    const base = robber.group.position.clone();
-    // 5x5 fence posts around robber
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dz = -1; dz <= 1; dz++) {
-        if (Math.abs(dx) + Math.abs(dz) !== 1) continue; // only cardinal neighbors
-        const postGeo = new THREE.BoxGeometry(0.1, 2, 0.1);
-        const post = new THREE.Mesh(postGeo, barMat);
-        post.position.set(base.x + dx, base.y + 1, base.z + dz);
-        cg.add(post);
-      }
-    }
-    // top bars
-    const topBarGeoH = new THREE.BoxGeometry(2.2, 0.08, 0.08);
-    const topBarGeoV = new THREE.BoxGeometry(0.08, 0.08, 2.2);
-    const tb1 = new THREE.Mesh(topBarGeoH, barMat);
-    tb1.position.set(base.x, base.y + 2, base.z - 1);
-    const tb2 = new THREE.Mesh(topBarGeoH, barMat);
-    tb2.position.set(base.x, base.y + 2, base.z + 1);
-    const tb3 = new THREE.Mesh(topBarGeoV, barMat);
-    tb3.position.set(base.x - 1, base.y + 2, base.z);
-    const tb4 = new THREE.Mesh(topBarGeoV, barMat);
-    tb4.position.set(base.x + 1, base.y + 2, base.z);
-    cg.add(tb1, tb2, tb3, tb4);
-    // floor bars
-    const fb1 = new THREE.Mesh(topBarGeoH, barMat);
-    fb1.position.set(base.x, base.y + 0.05, base.z - 1);
-    const fb2 = new THREE.Mesh(topBarGeoH, barMat);
-    fb2.position.set(base.x, base.y + 0.05, base.z + 1);
-    const fb3 = new THREE.Mesh(topBarGeoV, barMat);
-    fb3.position.set(base.x - 1, base.y + 0.05, base.z);
-    const fb4 = new THREE.Mesh(topBarGeoV, barMat);
-    fb4.position.set(base.x + 1, base.y + 0.05, base.z);
-    cg.add(fb1, fb2, fb3, fb4);
-
-    this.scene.add(cg);
-    return cg;
-  }
-
-  // ---------- Player ----------
-  _spawnPlayerSafe() {
-    // Search nearest column without anything above ground level (no trees in face).
-    let best = { x: 0, z: 0, y: this._topY(0, 0) };
-    for (let r = 0; r < 8 && best.y < 0; r++) {
-      for (let dx = -r; dx <= r && best.y < 0; dx++) {
-        for (let dz = -r; dz <= r && best.y < 0; dz++) {
-          const y = this._topY(dx, dz);
-          if (y >= 0) best = { x: dx, z: dz, y };
-        }
-      }
-    }
-    // Also avoid columns with a tree directly above (check 4 blocks up).
-    let chosen = best;
-    outer: for (let dx = -4; dx <= 4; dx++) {
-      for (let dz = -4; dz <= 4; dz++) {
-        const y = this._topY(dx, dz);
-        if (y < 0) continue;
-        let clear = true;
-        for (let dy = 0; dy < 3; dy++) {
-          if (this.hasBlock(dx, y + dy, dz)) { clear = false; break; }
-        }
-        if (clear) { chosen = { x: dx, z: dz, y }; break outer; }
-      }
-    }
-    this.player.pos.set(chosen.x + 0.5, chosen.y + 0.1, chosen.z + 0.5);
-    this._updateCameraPos();
-  }
-
-  _updateCameraPos() {
-    this.camera.position.set(
-      this.player.pos.x,
-      this.player.pos.y + PLAYER_HEIGHT,
-      this.player.pos.z
-    );
-    this.camera.rotation.order = "YXZ";
-    this.camera.rotation.y = this.yaw;
-    this.camera.rotation.x = this.pitch;
-  }
-
-  // ---------- Events ----------
-  _bindEvents() {
-    this._onResize = () => this._resize();
-    window.addEventListener("resize", this._onResize);
-
-    this._onKey = (e) => {
-      if (e.repeat) return;
-      const k = e.code;
-      if (e.type === "keydown") this.keys.add(k);
-      else this.keys.delete(k);
-      if (e.type === "keydown") {
-        if (k.startsWith("Digit")) {
-          const idx = parseInt(k.slice(5), 10) - 1;
-          if (idx >= 0 && idx < this.hotbar.length) {
-            this.selected = idx;
-            this.cb.onSelectChange && this.cb.onSelectChange(this.selected);
-          }
-        }
-      }
-    };
-    window.addEventListener("keydown", this._onKey);
-    window.addEventListener("keyup", this._onKey);
-
-    this._onMouseMove = (e) => {
-      if (!this.pointerLocked) return;
-      this.yaw -= e.movementX * 0.0025;
-      this.pitch -= e.movementY * 0.0025;
-      this.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, this.pitch));
-    };
-    document.addEventListener("mousemove", this._onMouseMove);
-
-    this._onClick = () => {
-      if (!this.pointerLocked) {
-        this.renderer.domElement.requestPointerLock();
-      }
-    };
-    this.renderer.domElement.addEventListener("click", this._onClick);
-
-    this._onPointerLockChange = () => {
-      this.pointerLocked = document.pointerLockElement === this.renderer.domElement;
-    };
-    document.addEventListener("pointerlockchange", this._onPointerLockChange);
-
-    this._onMouseDown = (e) => {
-      if (!this.pointerLocked) return;
-      if (e.button === 0) this._primaryAction();
-      else if (e.button === 2) this._placeBlock();
-    };
-    this.renderer.domElement.addEventListener("mousedown", this._onMouseDown);
-    this.renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
-
-    this._onWheel = (e) => {
-      if (!this.pointerLocked) return;
-      const dir = e.deltaY > 0 ? 1 : -1;
-      this.selected = (this.selected + dir + this.hotbar.length) % this.hotbar.length;
-      this.cb.onSelectChange && this.cb.onSelectChange(this.selected);
-    };
-    this.renderer.domElement.addEventListener("wheel", this._onWheel, { passive: true });
-  }
-
-  _resize() {
-    const w = this.container.clientWidth;
-    const h = this.container.clientHeight;
-    this.renderer.setSize(w, h, false);
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
-  }
-
-  // ---------- Actions ----------
-  _castRay() {
-    this.raycaster.setFromCamera({ x: 0, y: 0 }, this.camera);
-    const targets = [];
-    this.sheepEntities.forEach((e) => e.alive && targets.push(e.group));
-    this.blockMeshes.forEach((m) => targets.push(m));
-    if (this.robber && !this.robber.trapped) targets.push(this.robber.group);
-    const hits = this.raycaster.intersectObjects(targets, true);
-    return hits[0] || null;
-  }
-
-  _primaryAction() {
-    const hit = this._castRay();
-    if (!hit) return;
-    const obj = hit.object;
-    let root = obj;
-    while (root.parent && !root.userData?.kind) root = root.parent;
-    const data = root.userData || obj.userData;
-    if (data?.kind === "sheep") {
-      const ent = this.sheepEntities.find((e) => e.group === root);
-      if (ent && ent.alive) this._catchSheep(ent, "player");
-      return;
-    }
-    if (data?.kind === "robber") {
-      this._catchRobber();
-      return;
-    }
-    if (data?.kind === "block") {
-      this._removeBlock(data.x, data.y, data.z);
-    }
-  }
-
-  _catchRobber() {
-    const r = this.robber;
-    if (!r || r.trapped) return;
-    r.trapped = true;
-    r.trapTimer = 8; // seconds trapped
-    r.lootDropped = false;
-    // Build cage around robber
-    r.cageGroup = this._buildCage(r);
-    // Poof effect
-    this._poof(r.group.position, 0x6D28D9);
-    this.cb.onCatch && this.cb.onCatch({ id: "robber", name: "The Robber", meat: "Robber Loot" });
-  }
-
-  _placeBlock() {
-    const slot = this.hotbar[this.selected];
-    if (!slot || slot.type !== "block") return;
-    const hit = this._castRay();
-    if (!hit) return;
-    const data = hit.object.userData;
-    if (data?.kind !== "block") return;
-    const n = hit.face?.normal;
-    if (!n) return;
-    const nx = data.x + Math.round(n.x);
-    const ny = data.y + Math.round(n.y);
-    const nz = data.z + Math.round(n.z);
-    // Don't place inside player
-    const px = Math.floor(this.player.pos.x);
-    const py = Math.floor(this.player.pos.y);
-    const pz = Math.floor(this.player.pos.z);
-    if ((nx === px && nz === pz) && (ny === py || ny === py + 1)) return;
-    this._setBlock(nx, ny, nz, slot.id, true);
-  }
-
-  _catchSheep(ent, by = "player") {
-    if (!ent.alive) return;
-    ent.alive = false;
-    // Particle puff
-    this._poof(ent.group.position, ent.type.wool);
-    this.scene.remove(ent.group);
-    if (by === "player") {
-      this.cb.onCatch && this.cb.onCatch(ent.type);
-    } else {
-      this.cb.onRobber && this.cb.onRobber(ent.type);
-    }
-    // Respawn after a short delay
-    setTimeout(() => {
-      if (this.disposed) return;
-      this._spawnSheep();
-    }, 1500);
-  }
-
-  _poof(position, color) {
+  _makeMobMesh(mobType) {
     const group = new THREE.Group();
-    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 });
-    const parts = [];
-    for (let i = 0; i < 10; i++) {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.12), mat);
-      m.position.copy(position);
-      m.position.y += 0.5;
-      const v = new THREE.Vector3(
-        (Math.random() - 0.5) * 4,
-        Math.random() * 3 + 1,
-        (Math.random() - 0.5) * 4
-      );
-      group.add(m);
-      parts.push({ m, v });
+    const w = mobType.scaleW || 0.8, h = mobType.scaleH || 0.8, d = mobType.scaleD || 0.8;
+    const headSize = mobType.headSize || 0.3;
+    const mc = mobType.color, lc = mobType.accentColor || mc, ec = mobType.eyeColor || "#111";
+    const bodyMat = new THREE.MeshLambertMaterial({ color: mc });
+    const headMat = new THREE.MeshLambertMaterial({ color: mc });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(w, h * 0.6, d), bodyMat);
+    body.position.y = h * 0.4;
+    const head = new THREE.Mesh(new THREE.BoxGeometry(headSize, headSize, headSize), headMat);
+    head.position.set(w * 0.4 + headSize * 0.5, h * 0.6, 0);
+    group.add(body, head);
+    const eyeMat = new THREE.MeshLambertMaterial({ color: ec });
+    const eyeGeo = new THREE.BoxGeometry(0.06, 0.06, 0.04);
+    const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+    eyeL.position.set(w * 0.4 + headSize * 0.5, h * 0.58, headSize * 0.25);
+    const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+    eyeR.position.set(w * 0.4 + headSize * 0.5, h * 0.58, -headSize * 0.25);
+    group.add(eyeL, eyeR);
+    const legMat = new THREE.MeshLambertMaterial({ color: lc });
+    const legW = w * 0.15, legH = h * 0.3;
+    const legGeo = new THREE.BoxGeometry(legW, legH, legW);
+    [[w*0.25,legH*0.5,d*0.2],[w*0.25,legH*0.5,-d*0.2],[-w*0.25,legH*0.5,d*0.2],[-w*0.25,legH*0.5,-d*0.2]].forEach(([px,py,pz]) => {
+      const leg = new THREE.Mesh(legGeo, legMat);
+      leg.position.set(px, py, pz);
+      group.add(leg);
+    });
+    if (mobType.id === "chicken") {
+      const beakMat = new THREE.MeshLambertMaterial({ color: mobType.beakColor });
+      const beak = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.06, 0.06), beakMat);
+      beak.position.set(w*0.4+headSize*0.6, h*0.53, 0);
+      group.add(beak);
     }
+    if (mobType.id === "horse") {
+      const maneMat = new THREE.MeshLambertMaterial({ color: mobType.maneColor });
+      const mane = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.3, 0.4), maneMat);
+      mane.position.set(w*0.2, h*0.7, 0);
+      group.add(mane);
+    }
+    group.userData = { kind: "mob", typeId: mobType.id };
+    return group;
+  }
+
+  _spawnVillages() {
+    for (let i = 0; i < 1; i++) {
+      const vx = (Math.random() - 0.5) * 50;
+      const vz = (Math.random() - 0.5) * 50;
+      const vy = this._topY(Math.floor(vx), Math.floor(vz));
+      if (vy < 2) continue;
+      const type = pickRandomVillagerType();
+      const group = this._makeVillagerMesh(type);
+      group.position.set(vx, vy, vz);
+      this.scene.add(group);
+      this.villagerEntities.push({
+        group, type, vel: new THREE.Vector3(), wanderTimer: Math.random() * 5, bounceT: Math.random() * 10,
+      });
+    }
+  }
+
+  _makeVillagerMesh(type) {
+    const group = new THREE.Group();
+    const bodyMat = new THREE.MeshLambertMaterial({ color: type.robeColor });
+    const skinMat = new THREE.MeshLambertMaterial({ color: "#D4A574" });
+    const hairMat = new THREE.MeshLambertMaterial({ color: type.hairColor });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.9, 0.4), bodyMat);
+    body.position.y = 0.75;
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), skinMat);
+    head.position.y = 1.4;
+    const hair = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.15, 0.42), hairMat);
+    hair.position.y = 1.6;
+    group.add(body, head, hair);
+    group.userData = { kind: "villager" };
+    return group;
+  }
+
+  _spawnRobber() {
+    const group = new THREE.Group();
+    const robeMat = new THREE.MeshLambertMaterial({ color: "#1a1a2e" });
+    const skinMat = new THREE.MeshLambertMaterial({ color: "#D4A574" });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.0, 0.4), robeMat);
+    body.position.y = 0.8;
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 0.35), skinMat);
+    head.position.y = 1.5;
+    group.add(body, head);
+    let tries = 0, x, z, y;
+    do {
+      x = (Math.random() - 0.5) * 40;
+      z = (Math.random() - 0.5) * 40;
+      y = this._topY(Math.floor(x), Math.floor(z));
+      tries++;
+    } while (y < 2 && tries < 20);
+    group.position.set(x, y, z);
     this.scene.add(group);
+    this.robber = { group, vel: new THREE.Vector3(), wanderTimer: 0, snatchTimer: 8, target: null, trapped: false, trapTimer: 0, cageGroup: null };
+  }
+
+  _spawnPlayerSafe() {
+    const sy = this._topY(0, 0);
+    this.player.pos.set(0, sy + 1, 0);
+  }
+
+  _buildCage(robber) {
+    const group = new THREE.Group();
+    const barMat = new THREE.MeshLambertMaterial({ color: "#555" });
+    for (let i = 0; i < 8; i++) {
+      const angle = (i / 8) * Math.PI * 2;
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.5, 0.08), barMat);
+      bar.position.set(Math.cos(angle) * 0.6, 0.75, Math.sin(angle) * 0.6);
+      group.add(bar);
+    }
+    group.position.copy(robber.group.position);
+    this.scene.add(group);
+    return group;
+  }
+
+  _collectSheep(sheepEnt) {
+    sheepEnt.alive = false;
+    this.scene.remove(sheepEnt.group);
+    if (this.sheepEntities.filter(e => e.alive).length < 3) {
+      setTimeout(() => { if (!this.disposed) this._spawnSheep(); }, 5000);
+    }
+  }
+
+  _catchSheep(sheepEnt, reason) {
+    sheepEnt.alive = false;
+    this.scene.remove(sheepEnt.group);
+  }
+
+  _fireSheepAttack(ent, attackType) {
+    const now = performance.now();
+    const cooldown = this.sheepAttackCooldowns.get(ent) || 0;
+    if (now < cooldown) return;
+    this.sheepAttackCooldowns.set(ent, now + attackType.cooldown);
+    const pos = ent.group.position;
+    const playerPos = this.player.pos;
+    const dist = pos.distanceTo(playerPos);
+    if (dist > attackType.range) return;
+    if (attackType.damage) {
+      this.player.health = Math.max(0, this.player.health - attackType.damage);
+      if (this.player.health <= 0) {
+        this.cb.onGameOver && this.cb.onGameOver({ win: false });
+      }
+    }
+  }
+
+  _fireProjectile(from, to, color, damage, target) {
+    const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(color) });
+    const projectile = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.2), mat);
+    projectile.position.copy(from);
+    this.scene.add(projectile);
+    const dir = to.sub(from).normalize();
+    const speed = 15;
+    const maxTime = 2;
     const start = performance.now();
     const animate = () => {
+      if (this.disposed) { this.scene.remove(projectile); mat.dispose(); projectile.geometry.dispose(); return; }
       const t = (performance.now() - start) / 1000;
-      if (t > 0.7 || this.disposed) {
-        this.scene.remove(group);
-        parts.forEach((p) => p.m.geometry.dispose());
-        mat.dispose();
-        return;
+      if (t > maxTime) { this.scene.remove(projectile); mat.dispose(); projectile.geometry.dispose(); return; }
+      projectile.position.add(dir.clone().multiplyScalar(speed * 0.016));
+      if (target.type === "robber" && target.ref && !target.ref.trapped) {
+        if (projectile.position.distanceTo(target.ref.group.position) < 1) {
+          target.ref.trapped = true;
+          target.ref.trapTimer = 5;
+          target.ref.cageGroup = this._buildCage(target.ref);
+          this.scene.remove(projectile);
+          mat.dispose();
+          projectile.geometry.dispose();
+          return;
+        }
       }
-      parts.forEach((p) => {
-        p.m.position.x += p.v.x * 0.016;
-        p.m.position.y += p.v.y * 0.016;
-        p.m.position.z += p.v.z * 0.016;
-        p.v.y -= 0.3;
-        p.m.material.opacity = 1 - t / 0.7;
-      });
       requestAnimationFrame(animate);
     };
     animate();
   }
 
-  // ---------- Physics / collision ----------
-  // isFence: blocks sheep/robber but NOT player (player can jump over)
-  _isFence(x, y, z) {
-    const id = this.world.get(key(x, y, z));
-    return id === "fence";
-  }
-
-  _collidesAt(pos, entity = "player") {
-    const r = PLAYER_RADIUS;
-    const minX = Math.floor(pos.x - r);
-    const maxX = Math.floor(pos.x + r);
-    const minZ = Math.floor(pos.z - r);
-    const maxZ = Math.floor(pos.z + r);
-    const minY = Math.floor(pos.y);
-    const maxY = Math.floor(pos.y + PLAYER_HEIGHT - 0.01);
-    for (let x = minX; x <= maxX; x++)
-      for (let y = minY; y <= maxY; y++)
-        for (let z = minZ; z <= maxZ; z++) {
-          const id = this.world.get(key(x, y, z));
-          if (!id) continue;
-          if (id === "flower") continue;
-          // Fences block sheep/robber but not player
-          if (id === "fence" && entity === "player") continue;
-          return true;
-        }
-    return false;
-  }
-
-  // Sheep-specific collision (fences block them)
-  _sheepCollidesAt(x, y, z) {
-    // Check if any block at sheep body level is solid (including fences)
-    for (let dy = 0; dy <= 1; dy++) {
-      const id = this.world.get(key(Math.floor(x), Math.floor(y) + dy, Math.floor(z)));
-      if (id && id !== "flower") return true;
+  _poof(position, color) {
+    const group = new THREE.Group();
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 });
+    for (let i = 0; i < 5; i++) {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.12), mat);
+      m.position.copy(position);
+      group.add(m);
     }
-    return false;
+    this.scene.add(group);
+    setTimeout(() => { this.scene.remove(group); }, 500);
   }
 
+  // --- Player movement ---
   _movePlayer(dt) {
     const p = this.player;
-    // input
-    const forward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
-    const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    const move = new THREE.Vector3();
-    if (this.keys.has("KeyW") || this.keys.has("ArrowUp")) move.add(forward);
-    if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) move.sub(forward);
-    if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) move.add(right);
-    if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) move.sub(right);
-    if (move.lengthSq() > 0) move.normalize().multiplyScalar(MOVE_SPEED);
-    p.vel.x = move.x;
-    p.vel.z = move.z;
-    if ((this.keys.has("Space")) && p.onGround) {
-      p.vel.y = JUMP_VELOCITY;
-      p.onGround = false;
-    }
+    const move = (this.keys.has("KeyA") ? -1 : 0) + (this.keys.has("KeyD") ? 1 : 0);
+    p.vel.x = move * MOVE_SPEED;
+    if (this.keys.has("Space") && p.onGround) { p.vel.y = JUMP_VELOCITY; p.onGround = false; }
     p.vel.y += GRAVITY * dt;
+    p.pos.x += p.vel.x * dt;
+    p.pos.y += p.vel.y * dt;
+    p.pos.z += 0; // 1D movement for simplicity
 
-    // X axis
-    const next = p.pos.clone();
-    next.x += p.vel.x * dt;
-    if (!this._collidesAt(next)) p.pos.x = next.x;
-    else p.vel.x = 0;
-    // Z axis
-    next.copy(p.pos);
-    next.z += p.vel.z * dt;
-    if (!this._collidesAt(next)) p.pos.z = next.z;
-    else p.vel.z = 0;
-    // Y axis
-    next.copy(p.pos);
-    next.y += p.vel.y * dt;
-    if (!this._collidesAt(next)) {
-      p.pos.y = next.y;
-      p.onGround = false;
-    } else {
-      if (p.vel.y < 0) p.onGround = true;
-      p.vel.y = 0;
-    }
-    // World bottom
-    if (p.pos.y < -10) {
-      this._spawnPlayerSafe();
-      p.vel.set(0, 0, 0);
-    }
+    // Ground collision
+    const groundY = this._topY(Math.floor(p.pos.x), 0);
+    if (p.pos.y <= groundY) { p.pos.y = groundY; p.vel.y = 0; p.onGround = true; }
   }
 
-  // ---------- Sheep AI ----------
+  _updateCameraPos() {
+    this.camera.position.copy(this.player.pos);
+    this.camera.position.y += 1.5;
+  }
+
   _updateSheep(dt) {
     for (const ent of this.sheepEntities) {
       if (!ent.alive) continue;
       ent.wanderTimer -= dt;
-      ent.bounceT += dt * 4;
+      ent.bounceT += dt * 3;
       if (ent.wanderTimer <= 0) {
-        ent.wanderTimer = 1 + Math.random() * 3;
+        ent.wanderTimer = 2 + Math.random() * 4;
         const angle = Math.random() * Math.PI * 2;
-        const sp = 0.4 + Math.random() * 0.6;
+        ent.vel.set(Math.cos(angle) * 0.5, 0, Math.sin(angle) * 0.5);
+      }
+      const next = ent.group.position.clone();
+      next.x += ent.vel.x * dt;
+      next.z += ent.vel.z * dt;
+      const top = this._topY(Math.floor(next.x), Math.floor(next.z));
+      if (top > 0 && top < 15 && Math.abs(next.x) < 50 && Math.abs(next.z) < 50) {
+        ent.group.position.x = next.x;
+        ent.group.position.z = next.z;
+        ent.group.position.y = top;
+      } else {
+        ent.vel.multiplyScalar(-1);
+      }
+      ent.group.position.y += Math.sin(ent.bounceT) * 0.03;
+      if (ent.vel.lengthSq() > 0.01) {
+        ent.group.rotation.y = Math.atan2(ent.vel.x, ent.vel.z) - Math.PI / 2;
+      }
+      if (ent.hasAttack && ent.type.specialAttack) {
+        this._fireSheepAttack(ent, ent.type.specialAttack);
+      }
+    }
+  }
+
+  _updateMobs(dt) {
+    for (const ent of this.mobEntities) {
+      if (!ent.alive) continue;
+      ent.wanderTimer -= dt;
+      ent.bounceT += dt * 3;
+      if (ent.wanderTimer <= 0) {
+        ent.wanderTimer = 2 + Math.random() * 4;
+        const angle = Math.random() * Math.PI * 2;
+        const sp = ent.speed * (0.3 + Math.random() * 0.4);
         ent.vel.set(Math.cos(angle) * sp, 0, Math.sin(angle) * sp);
       }
       const next = ent.group.position.clone();
       next.x += ent.vel.x * dt;
       next.z += ent.vel.z * dt;
-
-      // Check fence collision ahead — if blocked, reverse direction
-      const lookAhead = 0.6;
-      const checkX = ent.group.position.x + (ent.vel.x > 0 ? lookAhead : ent.vel.x < 0 ? -lookAhead : 0);
-      const checkZ = ent.group.position.z + (ent.vel.z > 0 ? lookAhead : ent.vel.z < 0 ? -lookAhead : 0);
-      const groundY = this._topY(Math.floor(checkX), Math.floor(checkZ));
-      if (this._sheepCollidesAt(checkX, groundY, checkZ)) {
-        // Fence ahead — turn around
-        ent.vel.multiplyScalar(-1);
-      }
-
-      // stay inside world bounds & on ground
       const top = this._topY(Math.floor(next.x), Math.floor(next.z));
-      if (top > 0 && top < 10 && Math.abs(next.x) < 16 && Math.abs(next.z) < 16) {
-        // Also check if the destination itself has a fence
-        if (!this._sheepCollidesAt(next.x, top, next.z)) {
-          ent.group.position.x = next.x;
-          ent.group.position.z = next.z;
-          ent.group.position.y = top;
-        } else {
-          ent.vel.multiplyScalar(-1);
-        }
+      if (top > 0 && top < 15 && Math.abs(next.x) < 50 && Math.abs(next.z) < 50) {
+        ent.group.position.x = next.x;
+        ent.group.position.z = next.z;
+        ent.group.position.y = top;
       } else {
         ent.vel.multiplyScalar(-1);
       }
-      // bounce
-      ent.group.position.y += Math.sin(ent.bounceT) * 0.03;
-      // face direction
+      ent.group.position.y += Math.sin(ent.bounceT) * 0.02;
       if (ent.vel.lengthSq() > 0.01) {
         ent.group.rotation.y = Math.atan2(ent.vel.x, ent.vel.z) - Math.PI / 2;
       }
     }
   }
 
-  // ---------- Robber AI ----------
+  _updateVillagers(dt) {
+    for (const ent of this.villagerEntities) {
+      ent.wanderTimer -= dt;
+      ent.bounceT += dt * 2;
+      if (ent.wanderTimer <= 0) {
+        ent.wanderTimer = 3 + Math.random() * 5;
+        const angle = Math.random() * Math.PI * 2;
+        const sp = 0.2 + Math.random() * 0.3;
+        ent.vel.set(Math.cos(angle) * sp, 0, Math.sin(angle) * sp);
+      }
+      const next = ent.group.position.clone();
+      next.x += ent.vel.x * dt;
+      next.z += ent.vel.z * dt;
+      const top = this._topY(Math.floor(next.x), Math.floor(next.z));
+      if (top > 0 && top < 15) {
+        ent.group.position.x = next.x;
+        ent.group.position.z = next.z;
+        ent.group.position.y = top;
+      } else {
+        ent.vel.multiplyScalar(-1);
+      }
+      ent.group.position.y += Math.sin(ent.bounceT) * 0.015;
+      if (ent.vel.lengthSq() > 0.01) {
+        ent.group.rotation.y = Math.atan2(ent.vel.x, ent.vel.z) - Math.PI / 2;
+      }
+    }
+  }
+
   _updateRobber(dt) {
     const r = this.robber;
     if (!r) return;
-
-    // If trapped, count down timer then respawn
     if (r.trapped) {
       r.trapTimer -= dt;
       if (r.trapTimer <= 0) {
-        // Remove cage
-        if (r.cageGroup) {
-          this.scene.remove(r.cageGroup);
-          r.cageGroup = null;
-        }
-        // Respawn robber at a new location
+        if (r.cageGroup) { this.scene.remove(r.cageGroup); r.cageGroup = null; }
         this.scene.remove(r.group);
         this._spawnRobber();
       }
       return;
     }
-
+    if (!this.isNight) {
+      r.snatchTimer -= dt;
+      if (r.snatchTimer <= 0) {
+        r.snatchTimer = 2 + Math.random() * 3;
+        const angle = Math.random() * Math.PI * 2;
+        r.group.position.x += Math.cos(angle) * 2;
+        r.group.position.z += Math.sin(angle) * 2;
+        const top = this._topY(Math.floor(r.group.position.x), Math.floor(r.group.position.z));
+        if (top >= 0) r.group.position.y = top;
+      }
+      return;
+    }
     r.snatchTimer -= dt;
-    // pick target
     if (!r.target || !r.target.alive) {
-      const alive = this.sheepEntities.filter((e) => e.alive);
+      const alive = this.sheepEntities.filter(e => e.alive);
       if (alive.length === 0) return;
       r.target = alive[Math.floor(Math.random() * alive.length)];
     }
@@ -754,31 +1030,20 @@ export class LambcraftGame {
     const dir = tgt.sub(r.group.position);
     dir.y = 0;
     const dist = dir.length();
-    if (dist > 0.01) {
-      dir.normalize().multiplyScalar(2.0 * dt);
-      r.group.position.add(dir);
-    }
-    // snap to ground
+    if (dist > 0.01) { dir.normalize().multiplyScalar(2.5 * dt); r.group.position.add(dir); }
     const top = this._topY(Math.floor(r.group.position.x), Math.floor(r.group.position.z));
     if (top >= 0) r.group.position.y = top;
-    // face sheep
-    const lookDir = r.target.group.position.clone().sub(r.group.position);
-    r.group.rotation.y = Math.atan2(lookDir.x, lookDir.z);
-    // catch
+    r.group.rotation.y = Math.atan2(tgt.x - r.group.position.x, tgt.z - r.group.position.z);
     if (dist < 0.9 && r.snatchTimer <= 0) {
       this._catchSheep(r.target, "robber");
       r.target = null;
-      r.snatchTimer = 5 + Math.random() * 4; // robber rests briefly
+      r.snatchTimer = 5 + Math.random() * 4;
     }
   }
 
-  // ---------- Highlight ----------
   _updateHighlight() {
     const hit = this._castRay();
-    if (!hit) {
-      this.highlight.visible = false;
-      return;
-    }
+    if (!hit) { this.highlight.visible = false; return; }
     const d = hit.object.userData;
     if (d?.kind === "block") {
       this.highlight.visible = true;
@@ -788,34 +1053,53 @@ export class LambcraftGame {
     }
   }
 
-  // ---------- Loop ----------
+  // --- Loop (PERFORMANCE: cap dt, throttle highlight) ---
   _loop() {
     if (this.disposed) return;
     const now = performance.now();
     const dt = Math.min((now - this._last) / 1000, 0.05);
     this._last = now;
 
+    const t0 = performance.now();
+    this._updateDayNight(dt);
+    const t1 = performance.now();
     this._movePlayer(dt);
+    const t2 = performance.now();
     this._updateSheep(dt);
+    const t3 = performance.now();
+    this._updateMobs(dt);
+    const t4 = performance.now();
+    this._updateVillagers(dt);
+    const t5 = performance.now();
     this._updateRobber(dt);
+    const t6 = performance.now();
     this._updateCameraPos();
-    this._updateHighlight();
-    this.renderer.render(this.scene, this.camera);
+    const t7 = performance.now();
 
-    // periodic save callback
+    this._frameCount++;
+    if (this._frameCount % 4 === 0) this._updateHighlight(); // every 4th frame
+    const t8 = performance.now();
+
+    this.renderer.render(this.scene, this.camera);
+    const t9 = performance.now();
+
+    // Log profiling every 60 frames
+    if (this._frameCount % 60 === 0) {
+      const msg = `Frame: day=${(t1-t0).toFixed(1)} move=${(t2-t1).toFixed(1)} sheep=${(t3-t2).toFixed(1)} mobs=${(t4-t3).toFixed(1)} villagers=${(t5-t4).toFixed(1)} robber=${(t6-t5).toFixed(1)} cam=${(t7-t6).toFixed(1)} highlight=${(t8-t7).toFixed(1)} render=${(t9-t8).toFixed(1)} total=${(t9-t0).toFixed(1)}ms`;
+      console.log(msg);
+      window._lastProfile = msg;
+    }
+
+    if (!this._lastSave) this._lastSave = now;
     if (now - this._lastSave > 8000) {
       this._lastSave = now;
-      this.cb.onAutosaveTick && this.cb.onAutosaveTick({
-        blocksPlaced: this.blocksPlaced,
-        blocksBroken: this.blocksBroken,
-      });
+      this.cb.onAutosaveTick && this.cb.onAutosaveTick({ blocksPlaced: this.blocksPlaced, blocksBroken: this.blocksBroken });
     }
+
     this._raf = requestAnimationFrame(this._loop);
   }
 
-  setSelected(i) {
-    this.selected = i;
-  }
+  setSelected(i) { this.selected = i; }
 
   dispose() {
     this.disposed = true;
@@ -835,5 +1119,46 @@ export class LambcraftGame {
       }
     }
     if (document.pointerLockElement) document.exitPointerLock();
+  }
+
+  _bindEvents() {
+    this._onResize = () => this._resize();
+    this._onKey = (e) => {
+      if (e.type === "keydown") this.keys.add(e.code);
+      else this.keys.delete(e.code);
+    };
+    this._onMouseMove = (e) => {
+      if (!this.pointerLocked) return;
+      this.yaw -= e.movementX * 0.002;
+      this.pitch = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, this.pitch - e.movementY * 0.002));
+    };
+    this._onPointerLockChange = () => { this.pointerLocked = document.pointerLockElement === this.renderer.domElement; };
+    this._onClick = () => { if (!this.pointerLocked) this.renderer.domElement.requestPointerLock(); };
+    this._onMouseDown = (e) => { if (e.button === 2) this._removeBlockAtCursor(); };
+    this._onWheel = (e) => { this.selected = (this.selected + (e.deltaY > 0 ? 1 : -1) + this.hotbar.length) % this.hotbar.length; };
+
+    window.addEventListener("resize", this._onResize);
+    window.addEventListener("keydown", this._onKey);
+    window.addEventListener("keyup", this._onKey);
+    document.addEventListener("mousemove", this._onMouseMove);
+    document.addEventListener("pointerlockchange", this._onPointerLockChange);
+    this.renderer.domElement.addEventListener("click", this._onClick);
+    this.renderer.domElement.addEventListener("mousedown", this._onMouseDown);
+    this.renderer.domElement.addEventListener("wheel", this._onWheel);
+  }
+
+  _resize() {
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(w, h);
+  }
+
+  _removeBlockAtCursor() {
+    const hit = this._castRay();
+    if (!hit) return;
+    const d = hit.object.userData;
+    if (d?.kind === "block") this._removeBlock(d.x, d.y, d.z);
   }
 }

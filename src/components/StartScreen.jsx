@@ -13,17 +13,34 @@ export default function StartScreen({ onStart, loading, error }) {
   return (
     <div
       data-testid="start-screen"
-      className="absolute inset-0 z-30 flex items-center justify-center p-4"
       style={{
-        background:
-          "radial-gradient(circle at 30% 20%, #FDE68A 0%, #BAE6FD 40%, #86EFAC 100%)",
+        position: "fixed",
+        inset: 0,
+        zIndex: 30,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "1rem",
+        background: "radial-gradient(circle at 30% 20%, #FDE68A 0%, #BAE6FD 40%, #86EFAC 100%)",
+        minHeight: "100vh",
+        minWidth: "100vw",
       }}
     >
       <motion.div
         initial={{ scale: 0.85, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         transition={{ type: "spring", stiffness: 200, damping: 14 }}
-        className="bg-white/95 backdrop-blur-md rounded-[2rem] p-8 md:p-10 border-[6px] border-white shadow-2xl max-w-md w-full text-center"
+        style={{
+          background: "rgba(255,255,255,0.95)",
+          borderRadius: "2rem",
+          padding: "2rem",
+          border: "6px solid white",
+          boxShadow: "0 25px 50px -12px rgba(0,0,0,0.25)",
+          maxWidth: "28rem",
+          width: "100%",
+          textAlign: "center",
+          boxSizing: "border-box",
+        }}
       >
         <motion.div
           animate={{ y: [0, -8, 0] }}
@@ -41,7 +58,7 @@ export default function StartScreen({ onStart, loading, error }) {
             textShadow: "0 6px 0 #C2410C",
           }}
         >
-          Lambcraft
+          Lambcraft v3.2 UNIQUE_TEST_STRING_12345 SYNTAX_ERROR
         </h1>
         <p className="font-body text-lg text-slate-600 mt-3 mb-6">
           Catch all 50 sheep before the Robber does!
@@ -77,6 +94,7 @@ export default function StartScreen({ onStart, loading, error }) {
         <div className="mt-6 text-sm text-slate-500 font-body">
           <p>Tip: click the screen to look around with the mouse.</p>
           <p>WASD to move · Space to jump · 1–9 to pick items</p>
+          <p style={{fontSize: '0.7rem', color: '#999', marginTop: '0.5rem'}}>v3.2-perf ✓ DDA raycast + instanced meshes</p>
         </div>
       </motion.div>
     </div>

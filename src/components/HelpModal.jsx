@@ -19,7 +19,7 @@ export default function HelpModal({ open, onClose }) {
             animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0.9, opacity: 0 }}
             transition={{ type: "spring", stiffness: 220, damping: 18 }}
-            className="bg-sky-50 rounded-[2rem] border-[6px] border-sky-300 shadow-2xl w-full max-w-md p-6 md:p-8"
+            className="bg-sky-50 rounded-[2rem] border-[6px] border-sky-300 shadow-2xl w-full max-w-lg p-6 md:p-8 max-h-[85vh] overflow-y-auto"
           >
             <div className="flex items-center justify-between mb-3">
               <h2 className="font-heading text-3xl font-bold text-sky-700">
@@ -37,26 +37,40 @@ export default function HelpModal({ open, onClose }) {
               <div className={ROW}><span>Move</span><span className="font-bold">W A S D</span></div>
               <div className={ROW}><span>Jump</span><span className="font-bold">Space</span></div>
               <div className={ROW}><span>Look around</span><span className="font-bold">Mouse</span></div>
-              <div className={ROW}><span>Catch sheep / trap robber / break block</span><span className="font-bold">Left click</span></div>
+              <div className={ROW}><span>Attack / Catch / Mine</span><span className="font-bold">Left click</span></div>
               <div className={ROW}><span>Place block</span><span className="font-bold">Right click</span></div>
-              <div className={ROW}><span>Pick item</span><span className="font-bold">1 – 9</span></div>
+              <div className={ROW}><span>Pick item</span><span className="font-bold">1 – 0</span></div>
               <div className={ROW}><span>Open Sheepdex</span><span className="font-bold">🐑 button</span></div>
               <div className={ROW}><span>Pause</span><span className="font-bold">Esc</span></div>
             </div>
             <div className="mt-5 p-4 rounded-2xl bg-white border-2 border-sky-200 space-y-2">
               <p className="font-body text-slate-700">
-                <strong className="font-heading text-amber-600">Watch out!</strong>{" "}
-                The cheeky Robber wanders around and tries to snatch sheep first.
-                Be quick — catch sheep before he does!
+                <strong className="font-heading text-amber-600">🌙 Night & Day!</strong>{" "}
+                The world cycles between day and night. The Robber only steals sheep at night!
               </p>
               <p className="font-body text-slate-700">
-                <strong className="font-heading text-red-500">Trap the Robber!</strong>{" "}
-                Left-click the Robber to cage him. He'll break free after a few seconds!
+                <strong className="font-heading text-red-500">⚔️ Weapons!</strong>{" "}
+                Use the Sword to fight mobs and the Pickaxe to mine blocks faster.
               </p>
               <p className="font-body text-slate-700">
-                <strong className="font-heading text-amber-700">Build Fences!</strong>{" "}
-                Place fence blocks (slot 8) to pen in sheep. Sheep can't walk through fences,
-                but you can jump right over them.
+                <strong className="font-heading text-green-600">⛏️ Block Drops!</strong>{" "}
+                Mine blocks to collect them. You can place blocks from your inventory.
+              </p>
+              <p className="font-body text-slate-700">
+                <strong className="font-heading text-purple-600">🐑 Special Sheep!</strong>{" "}
+                Some sheep have special attacks (Fire, Ice, Rainbow Beam, etc.). Catch them to unlock their power!
+              </p>
+              <p className="font-body text-slate-700">
+                <strong className="font-heading text-blue-600">🌍 Biomes!</strong>{" "}
+                Explore Plains, Forests, Deserts, Volcanoes, and Fantasy lands. Each has unique blocks and terrain.
+              </p>
+              <p className="font-body text-slate-700">
+                <strong className="font-heading text-amber-700">🏘️ Villages!</strong>{" "}
+                Find villages with friendly villagers. They're peaceful and welcoming!
+              </p>
+              <p className="font-body text-slate-700">
+                <strong className="font-heading text-orange-600">🐄 Mobs!</strong>{" "}
+                Cows, pigs, chickens, horses, and bunnies roam the world. They drop loot when defeated.
               </p>
             </div>
           </motion.div>

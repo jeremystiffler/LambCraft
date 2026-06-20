@@ -22,6 +22,7 @@ function App() {
     meat: {},
     blocksPlaced: 0,
     blocksBroken: 0,
+    inventory: {},
   });
 
   const [username, setUsername] = useState("");
@@ -31,17 +32,22 @@ function App() {
   const [selected, setSelected] = useState(0);
   const [caught, setCaught] = useState([]);
   const [meatInventory, setMeatInventory] = useState({});
+  const [inventory, setInventory] = useState({});
   const [showSheepdex, setShowSheepdex] = useState(false);
   const [showInventory, setShowInventory] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [paused, setPaused] = useState(false);
   const [toasts, setToasts] = useState([]);
+  const [isNight, setIsNight] = useState(false);
+  const [health, setHealth] = useState(20);
+  const [maxHealth, setMaxHealth] = useState(20);
+  const [sheepAttacks, setSheepAttacks] = useState([]);
 
-  // Keep stateRef in sync for the save callback
   useEffect(() => {
     stateRef.current.caught = caught;
     stateRef.current.meat = meatInventory;
-  }, [caught, meatInventory]);
+    stateRef.current.inventory = inventory;
+  }, [caught, meatInventory, inventory]);
 
   const pushToast = useCallback((kind, text) => {
     const id = Date.now() + Math.random();
@@ -65,6 +71,7 @@ function App() {
         meat: player.meat_inventory || {},
         blocksPlaced: player.blocks_placed || 0,
         blocksBroken: player.blocks_broken || 0,
+        inventory: player.inventory || {},
       };
       localStorage.setItem(STORAGE_KEY, player.username);
       setRunning(true);
@@ -92,16 +99,30 @@ function App() {
         pushToast("robber", `The Robber snatched a ${sheepType.name}!`);
       },
       onSelectChange: (i) => setSelected(i),
+      onDayNightChange: (info) => {
+        setIsNight(info.isNight);
+      },
+      onInventoryChange: (inv) => {
+        setInventory({ ...inv });
+      },
+      onSheepAttack: (attack) => {
+        setSheepAttacks((prev) => {
+          if (prev.find(a => a.name === attack.name)) return prev;
+          return [...prev, attack];
+        });
+        pushToast("attack", `Unlocked ${attack.name}!`);
+      },
+      onToast: pushToast,
       onAutosaveTick: (info) => {
         stateRef.current.blocksPlaced = info.blocksPlaced;
         stateRef.current.blocksBroken = info.blocksBroken;
-        // fire and forget save
         savePlayer({
           username,
           caught_sheep: stateRef.current.caught,
           meat_inventory: stateRef.current.meat,
           blocks_placed: info.blocksPlaced,
           blocks_broken: info.blocksBroken,
+          inventory: stateRef.current.inventory,
         }).catch(() => {});
       },
     });
@@ -113,17 +134,14 @@ function App() {
     };
   }, [running, username, pushToast]);
 
-  // Sync selected slot to engine
   useEffect(() => {
     if (gameRef.current) gameRef.current.setSelected(selected);
   }, [selected]);
 
-  // Pointer lock pause detection
   useEffect(() => {
     if (!running) return;
     const handler = () => {
       const locked = document.pointerLockElement === gameRef.current?.renderer?.domElement;
-      // Pause only if no modal open and pointer released
       if (!locked && !showSheepdex && !showInventory && !showHelp) {
         setPaused(true);
       } else if (locked) {
@@ -134,7 +152,6 @@ function App() {
     return () => document.removeEventListener("pointerlockchange", handler);
   }, [running, showSheepdex, showInventory, showHelp]);
 
-  // When a modal opens, release pointer lock
   useEffect(() => {
     if (showSheepdex || showInventory || showHelp) {
       if (document.pointerLockElement) document.exitPointerLock();
@@ -145,7 +162,6 @@ function App() {
 
   return (
     <div className="App fixed inset-0 overflow-hidden font-body select-none">
-      {/* 3D canvas mount */}
       <div
         ref={containerRef}
         data-testid="game-root"
@@ -173,6 +189,11 @@ function App() {
             onOpenInventory={() => setShowInventory(true)}
             onOpenHelp={() => setShowHelp(true)}
             meatCount={totalMeat}
+            isNight={isNight}
+            health={health}
+            maxHealth={maxHealth}
+            inventory={inventory}
+            sheepAttacks={sheepAttacks}
           />
           <Toasts toasts={toasts} />
           <Sheepdex
@@ -182,6 +203,7 @@ function App() {
           />
           <InventoryModal
             open={showInventory}
+            inventory={inventory}
             meatInventory={meatInventory}
             onClose={() => setShowInventory(false)}
           />
